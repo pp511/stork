@@ -3,9 +3,12 @@ package portworx
 import (
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"math"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -167,6 +170,12 @@ const (
 	pureBackendParam     = "backend"
 	pureFileParam        = "pure_file"
 	pureBlockParam       = "pure_block"
+
+	statfsSOName              = "px_statfs.so"
+	statfsSODirInStork        = "/"
+	statfsSODirInVirtLauncher = "/etc"
+	statfsConfigMapName       = "px-statfs"
+	statfsVolName             = "px-statfs"
 )
 
 type cloudSnapStatus struct {
@@ -192,6 +201,9 @@ const (
 )
 
 var pxGroupSnapSelectorRegex = regexp.MustCompile(`^portworx\.selector/(.+)`)
+
+// Contents of the px statfs shared obj file
+var statfsSOContents []byte
 
 var snapAPICallBackoff = wait.Backoff{
 	Duration: volumeSnapshotInitialDelay,
@@ -3946,6 +3958,106 @@ func (p *portworx) CleanupRestoreResources(*storkapi.ApplicationRestore) error {
 	return nil
 }
 
+// GetPodPatches returns json patches to mutate the pod in a webhook
+func (p *portworx) GetPodPatches(podNamespace string, pod *v1.Pod) ([]k8sutils.JSONPatchOp, error) {
+	return p.getVirtLauncherPatches(podNamespace, pod)
+}
+
+func (p *portworx) getVirtLauncherPatches(podNamespace string, pod *v1.Pod) ([]k8sutils.JSONPatchOp, error) {
+	if pod.Labels["kubevirt.io"] != "virt-launcher" {
+		return nil, nil
+	}
+
+	// add the configMap as a volume to the pod
+	pod.Spec.Volumes = append(pod.Spec.Volumes, v1.Volume{
+		Name: statfsVolName,
+		VolumeSource: v1.VolumeSource{
+			ConfigMap: &v1.ConfigMapVolumeSource{
+				LocalObjectReference: v1.LocalObjectReference{
+					Name: statfsConfigMapName,
+				},
+			},
+		},
+	})
+
+	// add the configMap volume mount to all containers in the pod
+	for i := 0; i < len(pod.Spec.Containers); i++ {
+		pod.Spec.Containers[i].VolumeMounts = append(pod.Spec.Containers[i].VolumeMounts, v1.VolumeMount{
+			Name:      statfsVolName,
+			MountPath: path.Join(statfsSODirInVirtLauncher, statfsSOName),
+			SubPath:   statfsSOName,
+		})
+
+		pod.Spec.Containers[i].VolumeMounts = append(pod.Spec.Containers[i].VolumeMounts, v1.VolumeMount{
+			Name:      statfsVolName,
+			MountPath: "/etc/ld.so.preload",
+			SubPath:   "ld.so.preload",
+		})
+	}
+
+	containersBytes, err := json.Marshal(&pod.Spec.Containers)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal virt-launcher containers: %w", err)
+	}
+
+	volumesBytes, err := json.Marshal(&pod.Spec.Volumes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal virt-launcher volumes: %w", err)
+	}
+
+	patches := []k8sutils.JSONPatchOp{
+		{
+			Operation: "add",
+			Path:      "/metadata/labels/portworx.io~1statfs", // ~1 encodes / in the json patch
+			Value:     []byte(`"true"`),
+		},
+		{
+			Operation: "replace",
+			Path:      "/spec/containers",
+			Value:     containersBytes,
+		},
+		{
+			Operation: "replace",
+			Path:      "/spec/volumes",
+			Value:     volumesBytes,
+		},
+	}
+
+	if err := p.createStatfsConfigMap(podNamespace); err != nil {
+		return nil, fmt.Errorf("failed to create config map: %w", err)
+	}
+
+	podName := pod.Name
+	if podName == "" {
+		podName = pod.GenerateName + "***"
+	}
+	logrus.Infof("Mutating virt-launcher pod %s/%s", podNamespace, podName)
+	return patches, nil
+}
+
+func (p *portworx) createStatfsConfigMap(cmNamespace string) error {
+	cm := &v1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      statfsConfigMapName,
+			Namespace: cmNamespace,
+		},
+		BinaryData: map[string][]byte{
+			statfsSOName: statfsSOContents,
+		},
+		Data: map[string]string{
+			"ld.so.preload": path.Join(statfsSODirInVirtLauncher, statfsSOName),
+		},
+	}
+
+	if _, err := core.Instance().CreateConfigMap(cm); err != nil && !k8s_errors.IsAlreadyExists(err) {
+		logrus.Errorf("Failed to create  config map %v/%v: %v", cmNamespace, statfsConfigMapName, err)
+		return err
+	} else if err == nil {
+		logrus.Infof("Created configmap %v/%v", cmNamespace, statfsConfigMapName)
+	}
+	return nil
+}
+
 func init() {
 	p := &portworx{}
 	err := p.Init(nil)
@@ -3956,4 +4068,11 @@ func init() {
 	if err := storkvolume.Register(storkvolume.PortworxDriverName, p); err != nil {
 		logrus.Panicf("Error registering portworx volume driver: %v", err)
 	}
+
+	soPath := path.Join(statfsSODirInStork, statfsSOName)
+	statfsSOContents, err = ioutil.ReadFile(soPath)
+	if err != nil {
+		logrus.Panicf("Failed to read %s: %v", soPath, err)
+	}
+	logrus.Infof("successfully loaded %v (%v bytes)", soPath, len(statfsSOContents))
 }

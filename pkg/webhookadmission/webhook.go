@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/libopenstorage/stork/drivers/volume"
+	"github.com/libopenstorage/stork/pkg/k8sutils"
 	"github.com/portworx/sched-ops/k8s/admissionregistration"
 	"github.com/portworx/sched-ops/k8s/core"
 	log "github.com/sirupsen/logrus"
@@ -64,6 +65,7 @@ func (c *Controller) processMutateRequest(w http.ResponseWriter, req *http.Reque
 	var admissionResponse *v1beta1.AdmissionResponse
 	var err error
 	var schedPath string
+	var patches []k8sutils.JSONPatchOp
 	admissionReview := v1beta1.AdmissionReview{}
 	isStorkResource := false
 	skipHookAnnotation := defaultSkipAnnotation
@@ -90,7 +92,8 @@ func (c *Controller) processMutateRequest(w http.ResponseWriter, req *http.Reque
 	}
 
 	arReq := admissionReview.Request
-	resourceName := ""
+	resourceName := arReq.Name
+
 	switch arReq.Kind.Kind {
 	case "StatefulSet":
 		var ss appv1.StatefulSet
@@ -100,7 +103,9 @@ func (c *Controller) processMutateRequest(w http.ResponseWriter, req *http.Reque
 			http.Error(w, "Decode error", http.StatusBadRequest)
 			return
 		}
-		resourceName = ss.GetName()
+		if resourceName == "" {
+			resourceName = ss.GenerateName
+		}
 		log.Debugf("Received admission review request for sts %s,%s", resourceName, arReq.Namespace)
 		if !skipSchedulerUpdate(skipHookAnnotation, ss.ObjectMeta.Annotations) {
 			isStorkResource, err = c.checkVolumeOwner(ss.Spec.Template.Spec.Volumes, arReq.Namespace)
@@ -119,7 +124,9 @@ func (c *Controller) processMutateRequest(w http.ResponseWriter, req *http.Reque
 			http.Error(w, "Decode error", http.StatusBadRequest)
 			return
 		}
-		resourceName = deployment.GetName()
+		if resourceName == "" {
+			resourceName = deployment.GenerateName
+		}
 		log.Debugf("Received admission review request for deployment %s,%s", resourceName, arReq.Namespace)
 		if !skipSchedulerUpdate(skipHookAnnotation, deployment.ObjectMeta.Annotations) {
 			isStorkResource, err = c.checkVolumeOwner(deployment.Spec.Template.Spec.Volumes, arReq.Namespace)
@@ -138,7 +145,9 @@ func (c *Controller) processMutateRequest(w http.ResponseWriter, req *http.Reque
 			http.Error(w, "Decode error", http.StatusBadRequest)
 			return
 		}
-		resourceName = pod.GetName()
+		if resourceName == "" {
+			resourceName = pod.GenerateName
+		}
 		log.Debugf("Received admission review request for pod %s,%s", resourceName, arReq.Namespace)
 		if !skipSchedulerUpdate(skipHookAnnotation, pod.ObjectMeta.Annotations) {
 			isStorkResource, err = c.checkVolumeOwner(pod.Spec.Volumes, arReq.Namespace)
@@ -148,11 +157,23 @@ func (c *Controller) processMutateRequest(w http.ResponseWriter, req *http.Reque
 				return
 			}
 			schedPath = podSpecSchedPath
+
+			// get extra patches for pods
+			if isStorkResource {
+				// pod object does not have name and namespace populated, so we pass them separately. Also,
+				// if the pod is using generateName, arReq.Name is empty.
+				patches, err = c.Driver.GetPodPatches(arReq.Namespace, &pod)
+				if err != nil {
+					log.Errorf("Failed to get pod patches for pod %s/%s: %v", arReq.Namespace, resourceName, err)
+					c.Recorder.Event(webhookConfig, v1.EventTypeWarning, "could not get pod patches", err.Error())
+					http.Error(w, "Could not get pod patches", http.StatusInternalServerError)
+					return
+				}
+			}
 		}
 	}
 
 	if !isStorkResource {
-		// ignore for non driver application + resources other than depoy/ss
 		admissionResponse = &v1beta1.AdmissionResponse{
 			Result: &metav1.Status{
 				Message: "Ignoring backends which are not supported by stork ",
@@ -161,13 +182,27 @@ func (c *Controller) processMutateRequest(w http.ResponseWriter, req *http.Reque
 		}
 	} else {
 		// create patch
-		log.Debugf("Updating scheduler to stork for Resource:%s, Name: %s, Namespace:%s", arReq.Kind.Kind, resourceName, arReq.Namespace)
-		patch := createPatch(schedPath)
+		log.Debugf("Updating scheduler to stork for Resource:%s, Name: %s, Namespace:%s",
+			arReq.Kind.Kind, resourceName, arReq.Namespace)
+
+		patches = append(patches, k8sutils.JSONPatchOp{
+			Operation: "replace",
+			Path:      schedPath,
+			Value:     []byte(strconv.Quote(storkScheduler)),
+		})
+		patchBytes, err := json.Marshal(&patches)
+		if err != nil {
+			log.Errorf("Could not marshal the patch object: %v", err)
+			c.Recorder.Event(webhookConfig, v1.EventTypeWarning, "could not marshal the patch object", err.Error())
+			http.Error(w, "Encode error", http.StatusInternalServerError)
+			return
+		}
+
 		admissionResponse = &v1beta1.AdmissionResponse{
 			Result: &metav1.Status{
 				Message: "Successful",
 			},
-			Patch:   patch,
+			Patch:   patchBytes,
 			Allowed: true,
 			PatchType: func() *v1beta1.PatchType {
 				pt := v1beta1.PatchTypeJSONPatch
@@ -296,22 +331,6 @@ func (c *Controller) Stop() error {
 	}
 	c.started = false
 	return nil
-}
-
-// createJson patch to update container spec scheduler path
-func createPatch(schedpath string) []byte {
-	p := []map[string]string{}
-	patch := map[string]string{
-		"op":    "replace",
-		"path":  schedpath,
-		"value": storkScheduler,
-	}
-	p = append(p, patch)
-	b, err := json.Marshal(p)
-	if err != nil {
-		log.Errorf("could not marshal patch: %v", err)
-	}
-	return b
 }
 
 func skipSchedulerUpdate(skipHookAnnotation string, annotations map[string]string) bool {
