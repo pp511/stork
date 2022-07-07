@@ -202,9 +202,6 @@ const (
 
 var pxGroupSnapSelectorRegex = regexp.MustCompile(`^portworx\.selector/(.+)`)
 
-// Contents of the px statfs shared obj file
-var statfsSOContents []byte
-
 var snapAPICallBackoff = wait.Backoff{
 	Duration: volumeSnapshotInitialDelay,
 	Factor:   volumeSnapshotFactor,
@@ -4036,6 +4033,13 @@ func (p *portworx) getVirtLauncherPatches(podNamespace string, pod *v1.Pod) ([]k
 }
 
 func (p *portworx) createStatfsConfigMap(cmNamespace string) error {
+	soPath := path.Join(statfsSODirInStork, statfsSOName)
+	statfsSOContents, err := ioutil.ReadFile(soPath)
+	if err != nil {
+		logrus.Errorf("Failed to read %s: %v", soPath, err)
+		return err
+	}
+
 	cm := &v1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      statfsConfigMapName,
@@ -4068,11 +4072,4 @@ func init() {
 	if err := storkvolume.Register(storkvolume.PortworxDriverName, p); err != nil {
 		logrus.Panicf("Error registering portworx volume driver: %v", err)
 	}
-
-	soPath := path.Join(statfsSODirInStork, statfsSOName)
-	statfsSOContents, err = ioutil.ReadFile(soPath)
-	if err != nil {
-		logrus.Panicf("Failed to read %s: %v", soPath, err)
-	}
-	logrus.Infof("successfully loaded %v (%v bytes)", soPath, len(statfsSOContents))
 }
