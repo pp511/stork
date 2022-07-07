@@ -3958,7 +3958,7 @@ func (p *portworx) CleanupRestoreResources(*storkapi.ApplicationRestore) error {
 	return nil
 }
 
-// GetPodPatches returns json patches to mutate the pod in a webhook
+// GetPodPatches returns driver-specific json patches to mutate the pod in a webhook
 func (p *portworx) GetPodPatches(podNamespace string, pod *v1.Pod) ([]k8sutils.JSONPatchOp, error) {
 	return p.getVirtLauncherPatches(podNamespace, pod)
 }
@@ -4031,7 +4031,7 @@ func (p *portworx) getVirtLauncherPatches(podNamespace string, pod *v1.Pod) ([]k
 	if podName == "" {
 		podName = pod.GenerateName + "***"
 	}
-	logrus.Infof("Mutating virt-launcher pod %s/%s", podNamespace, podName)
+	logrus.Infof("Mutating kubevirt's virt-launcher pod %s/%s to support live migration of VM", podNamespace, podName)
 	return patches, nil
 }
 

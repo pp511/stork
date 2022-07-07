@@ -315,7 +315,7 @@ func (m *Driver) UpdateMigratedPersistentVolumeSpec(
 
 }
 
-// GetPodPatches returns json patches to mutate the pod in a webhook
+// GetPodPatches returns driver-specific json patches to mutate the pod in a webhook
 func (m *Driver) GetPodPatches(podNamespace string, pod *v1.Pod) ([]k8sutils.JSONPatchOp, error) {
 	return nil, nil
 }

@@ -1894,7 +1894,7 @@ func (c *csi) CleanupRestoreResources(restore *storkapi.ApplicationRestore) erro
 	return nil
 }
 
-// GetPodPatches returns json patches to mutate the pod in a webhook
+// GetPodPatches returns driver-specific json patches to mutate the pod in a webhook
 func (c *csi) GetPodPatches(podNamespace string, pod *v1.Pod) ([]k8sutils.JSONPatchOp, error) {
 	return nil, nil
 }

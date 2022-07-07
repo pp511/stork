@@ -185,16 +185,11 @@ func (c *Controller) processMutateRequest(w http.ResponseWriter, req *http.Reque
 		log.Debugf("Updating scheduler to stork for Resource:%s, Name: %s, Namespace:%s",
 			arReq.Kind.Kind, resourceName, arReq.Namespace)
 
-		patches = append(patches, k8sutils.JSONPatchOp{
-			Operation: "replace",
-			Path:      schedPath,
-			Value:     []byte(strconv.Quote(storkScheduler)),
-		})
-		patchBytes, err := json.Marshal(&patches)
+		patchBytes, err := createPatch(patches, schedPath)
 		if err != nil {
-			log.Errorf("Could not marshal the patch object: %v", err)
-			c.Recorder.Event(webhookConfig, v1.EventTypeWarning, "could not marshal the patch object", err.Error())
-			http.Error(w, "Encode error", http.StatusInternalServerError)
+			log.Errorf("Could not create patch: %v", err)
+			c.Recorder.Event(webhookConfig, v1.EventTypeWarning, "could not create patch", err.Error())
+			http.Error(w, "Could not create patch", http.StatusInternalServerError)
 			return
 		}
 
@@ -331,6 +326,20 @@ func (c *Controller) Stop() error {
 	}
 	c.started = false
 	return nil
+}
+
+// createPatch creates a Json patch to update container spec scheduler path in addition to the other patches provided
+func createPatch(patches []k8sutils.JSONPatchOp, schedPath string) ([]byte, error) {
+	allPatches := append(patches, k8sutils.JSONPatchOp{
+		Operation: "replace",
+		Path:      schedPath,
+		Value:     []byte(strconv.Quote(storkScheduler)),
+	})
+	patchBytes, err := json.Marshal(&allPatches)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal the patch object: %w", err)
+	}
+	return patchBytes, nil
 }
 
 func skipSchedulerUpdate(skipHookAnnotation string, annotations map[string]string) bool {
