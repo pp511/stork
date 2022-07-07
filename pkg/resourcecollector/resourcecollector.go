@@ -46,7 +46,9 @@ const (
 	IncludeResources = "stork.libopenstorage.org/include-resource"
 
 	// ServiceKind for k8s service resources
-	ServiceKind          = "Service"
+	ServiceKind = "Service"
+	// NetworkPolicyKind for network policy resources
+	NetworkPolicyKind    = "NetworkPolicy"
 	deletedMaxRetries    = 12
 	deletedRetryInterval = 10 * time.Second
 )
